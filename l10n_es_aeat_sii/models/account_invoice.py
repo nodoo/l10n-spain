@@ -2,6 +2,7 @@
 # Copyright 2017 Ignacio Ibeas <ignacio@acysos.com>
 # Copyright 2017 Studio73 - Pablo Fuentes <pablo@studio73>
 # Copyright 2017 Studio73 - Jordi Tolsà <jordi@studio73.es>
+# Copyright 2018 Javi Melendez <javimelex@gmail.com>
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
 import logging
@@ -920,15 +921,26 @@ class AccountInvoice(models.Model):
         return {}
 
     @api.multi
+    def _connect_params_sii(self, mapping_key):
+        self.ensure_one()
+        params = {
+            'wsdl': self.env['ir.config_parameter'].get_param(
+                self.SII_WDSL_MAPPING[mapping_key], False
+            ),
+            'port_name': self.SII_PORT_NAME_MAPPING[mapping_key],
+            'test_address': False,
+        }
+        agency = self.company_id.sii_tax_agency_id
+        if agency:
+            params.update(agency._connect_params_sii(params['port_name']))
+        if not params['test_address'] and self.company_id.sii_test:
+            params['port_name'] += 'Pruebas'
+        return params
+
+    @api.multi
     def _connect_sii(self, mapping_key):
         self.ensure_one()
-        company = self.company_id
-        wsdl = self.env['ir.config_parameter'].get_param(
-            self.SII_WDSL_MAPPING[mapping_key], False
-        )
-        port_name = self.SII_PORT_NAME_MAPPING[mapping_key]
-        if company.sii_test:
-            port_name += 'Pruebas'
+        params = self._connect_params_sii(mapping_key)
         today = fields.Date.today()
         sii_config = self.env['l10n.es.aeat.sii'].search([
             ('company_id', '=', self.company_id.id),
@@ -954,8 +966,23 @@ class AccountInvoice(models.Model):
         session.cert = (public_crt, private_key)
         transport = Transport(session=session)
         history = HistoryPlugin()
-        client = Client(wsdl=wsdl, transport=transport, plugins=[history])
-        return client.bind('siiService', port_name)
+        client = Client(
+            wsdl=params['wsdl'], transport=transport, plugins=[history],
+        )
+        return self._bind_sii(
+            client, params['port_name'], params['test_address'],
+        )
+
+    @api.multi
+    def _bind_sii(self, client, port_name, test_address):
+        self.ensure_one()
+        if test_address:
+            service = client._get_service('siiService')
+            port = client._get_port(service, port_name)
+            proxy = client.create_service(port.binding.name, test_address)
+        else:
+            proxy = client.bind('siiService', port_name)
+        return proxy
 
     @api.multi
     def _process_invoice_for_sii_send(self):
